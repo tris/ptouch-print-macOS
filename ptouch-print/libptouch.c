@@ -26,11 +26,6 @@
 #include <sys/stat.h>	/* open() */
 #include <fcntl.h>	/* open() */
 #include <time.h>	/* nanosleep(), struct timespec */
-#include <unistd.h>	/* read(), write(), close() */
-#include <termios.h>	/* serial port setup */
-#include <poll.h>	/* poll() */
-#include <errno.h>
-#include <glob.h>	/* glob() for finding Bluetooth serial ports */
 #ifdef __APPLE__
 #include "TargetConditionals.h"
 #endif
@@ -41,6 +36,9 @@
 #endif
 #include "gettext.h"	/* gettext(), ngettext() */
 #include "ptouch.h"
+#if TARGET_OS_MAC
+#include "include/btMac.h"
+#endif
 
 #define _(s) gettext(s)
 
@@ -84,7 +82,7 @@ struct _pt_dev_info ptdevs[] = {
 	{0x04f9, 0x20c7, "PT-P910BT", 560, 360, FLAG_RASTER_PACKBITS|FLAG_P700_INIT|FLAG_USE_INFO_CMD, -8},
 	/* PT-P910BT: 360dpi, 36mm max tape, 32mm max print height - same
 	   specs as the PT-P900 series, so it uses the same parameters.
-	   Over Bluetooth it shows up as the serial port /dev/cu.PT-P910BTxxxx */
+	   Over Bluetooth it is reached through its SPP RFCOMM channel. */
 	{0,0,"",0,0,0,0}
 };
 
@@ -108,7 +106,6 @@ static int ptouch_alloc(ptouch_dev *ptdev)
 		fprintf(stderr, _("out of memory\n"));
 		return -1;
 	}
-	(*ptdev)->fd=-1;
 	if (((*ptdev)->devinfo=calloc(1, sizeof(struct _pt_dev_info))) == NULL) {
 		fprintf(stderr, _("out of memory\n"));
 		return -1;
@@ -120,59 +117,35 @@ static int ptouch_alloc(ptouch_dev *ptdev)
 	return 0;
 }
 
-/* Return the first Bluetooth serial port that looks like a P-Touch
-   printer (/dev/cu.PT-*), or NULL. The caller must free() the result. */
-char *ptouch_find_port(void)
+/* Open a paired printer over Bluetooth. want is a (part of the) device
+   name or address, or NULL for the first paired "PT-*" device. The printer
+   model is derived from the Bluetooth device name, e.g. "PT-P910BT2863". */
+int ptouch_open_bt(ptouch_dev *ptdev, const char *want)
 {
-	glob_t g;
-	char *port=NULL;
-
-	if (glob("/dev/cu.PT-*", 0, NULL, &g) == 0) {
-		if (g.gl_pathc > 0) {
-			port=strdup(g.gl_pathv[0]);
-		}
-		globfree(&g);
-	}
-	return port;
-}
-
-/* Open a printer through a serial port, e.g. the Bluetooth SPP port that
-   macOS creates for a paired printer (/dev/cu.PT-P910BT1234). The printer
-   model is derived from the port name. */
-int ptouch_open_port(ptouch_dev *ptdev, const char *path)
-{
-	struct termios t;
+	char name[128];
 	int k, found=-1;
 
 	if (ptouch_alloc(ptdev) != 0) {
 		return -1;
 	}
+	if (ptbt_open(want, name, sizeof(name)) != 0) {
+		return -1;
+	}
 	for (k=0; ptdevs[k].vid > 0; k++) {
-		/* prefer the longest matching name, e.g. "PT-P910BT" over "PT-P9" */
-		if (strstr(path, ptdevs[k].name) != NULL &&
+		/* prefer the longest matching name */
+		if (strstr(name, ptdevs[k].name) != NULL &&
 		    (found < 0 || strlen(ptdevs[k].name) > strlen(ptdevs[found].name))) {
 			found=k;
 		}
 	}
-	if (found < 0) {
-		fprintf(stderr, _("can not tell the printer model from port name %s\n"), path);
+	if (found < 0 || (ptdevs[found].flags & (FLAG_PLITE|FLAG_UNSUP_RASTER))) {
+		fprintf(stderr, _("printer model %s is not supported\n"), name);
+		ptbt_close();
 		return -1;
 	}
-	if (ptdevs[found].flags & (FLAG_PLITE|FLAG_UNSUP_RASTER)) {
-		fprintf(stderr, _("%s is not supported\n"), ptdevs[found].name);
-		return -1;
-	}
-	fprintf(stderr, _("opening %s on %s (this can take a few seconds over Bluetooth)\n"), ptdevs[found].name, path);
-	if (((*ptdev)->fd=open(path, O_RDWR | O_NOCTTY)) < 0) {
-		fprintf(stderr, _("can not open %s: %s\n"), path, strerror(errno));
-		return -1;
-	}
-	if (tcgetattr((*ptdev)->fd, &t) == 0) {
-		cfmakeraw(&t);
-		t.c_cflag |= CLOCAL | CREAD;
-		tcsetattr((*ptdev)->fd, TCSANOW, &t);
-	}
+	(*ptdev)->bt=1;
 	ptouch_set_devinfo(*ptdev, found);
+	fprintf(stderr, _("%s connected over Bluetooth\n"), ptdevs[found].name);
 	return 0;
 }
 
@@ -244,9 +217,8 @@ int ptouch_open(ptouch_dev *ptdev)
 
 int ptouch_close(ptouch_dev ptdev)
 {
-	if (ptdev->fd >= 0) {
-		close(ptdev->fd);
-		ptdev->fd=-1;
+	if (ptdev->bt) {
+		ptbt_close();
 		return 0;
 	}
 	libusb_release_interface(ptdev->h, 0);
@@ -261,20 +233,8 @@ int ptouch_send(ptouch_dev ptdev, uint8_t *data, size_t len)
 	if ((ptdev == NULL) || (len > 128)) {
 		return -1;
 	}
-	if (ptdev->fd >= 0) {
-		size_t done=0;
-		while (done < len) {
-			ssize_t n=write(ptdev->fd, data+done, len-done);
-			if (n < 0) {
-				if (errno == EINTR || errno == EAGAIN) {
-					continue;
-				}
-				fprintf(stderr, _("write error: %s\n"), strerror(errno));
-				return -1;
-			}
-			done+=(size_t)n;
-		}
-		return 0;
+	if (ptdev->bt) {
+		return ptbt_write(data, len);
 	}
 	if ((r=libusb_bulk_transfer(ptdev->h, 0x02, data, (int)len, &tx, 0)) != 0) {
 		fprintf(stderr, _("write error: %s\n"), libusb_error_name(r));
@@ -287,37 +247,21 @@ int ptouch_send(ptouch_dev ptdev, uint8_t *data, size_t len)
 	return 0;
 }
 
-/* Read up to len bytes, waiting at most timeout_ms for each chunk. Over a
-   serial port the reply can arrive in pieces, so keep reading until len
-   bytes arrived or the printer goes quiet. */
+/* Read up to len bytes, waiting at most timeout_ms. Over Bluetooth the
+   reply can arrive in pieces, so wait until len bytes arrived. */
 int ptouch_read(ptouch_dev ptdev, uint8_t *buf, int len, int timeout_ms, int *tx)
 {
 	*tx=0;
-	if (ptdev->fd < 0) {
-		return libusb_bulk_transfer(ptdev->h, 0x81, buf, len, tx, (unsigned int)timeout_ms);
+	if (ptdev->bt) {
+		return ptbt_read(buf, len, timeout_ms, tx);
 	}
-	while (*tx < len) {
-		struct pollfd p={ptdev->fd, POLLIN, 0};
-		int r=poll(&p, 1, timeout_ms);
-		if (r < 0 && errno == EINTR) {
-			continue;
-		}
-		if (r <= 0) {
-			break;
-		}
-		ssize_t n=read(ptdev->fd, buf+*tx, (size_t)(len-*tx));
-		if (n <= 0) {
-			break;
-		}
-		*tx+=(int)n;
-	}
-	return 0;
+	return libusb_bulk_transfer(ptdev->h, 0x81, buf, len, tx, (unsigned int)timeout_ms);
 }
 
 int ptouch_init(ptouch_dev ptdev)
 {
 	char cmd[]="\x1b\x40";		/* 1B 40 = ESC @ = INIT */
-	if ((ptdev->fd >= 0) || (ptdev->devinfo->flags & FLAG_USE_INFO_CMD)) {
+	if ((ptdev->bt) || (ptdev->devinfo->flags & FLAG_USE_INFO_CMD)) {
 		/* newer printers want 100 bytes of 0x00 (invalidate) before ESC @,
 		   which also clears any half-received job */
 		uint8_t inval[100];
@@ -343,27 +287,34 @@ int ptouch_info_cmd(ptouch_dev ptdev, int raster_lines)
 	return ptouch_send(ptdev, cmd, sizeof(cmd));
 }
 
-/* After the print command, wait for the printer to report that printing is
-   complete (or an error). Needed over Bluetooth: closing the port too early
-   can drop the end of the job. */
+/* After the print command, wait until the printer has taken the whole job
+   before disconnecting. The PT-P910BT sends no "printing completed" status
+   on its own, so ask for a status: the printer answers once it has
+   processed everything sent before the request. */
 int ptouch_wait_print_done(ptouch_dev ptdev, int timeout_sec)
 {
+	char cmd[]="\x1biS";	/* ESC i S = status information request */
 	uint8_t buf[32];
 	int tx;
 	time_t end=time(NULL)+timeout_sec;
 
+	if (ptouch_send(ptdev, (uint8_t *)cmd, strlen(cmd)) != 0) {
+		return -1;
+	}
 	while (time(NULL) < end) {
 		ptouch_read(ptdev, buf, 32, 1000, &tx);
+		if (tx > 0 && getenv("PTOUCH_DEBUG")) {
+			fprintf(stderr, "status reply (%d bytes):\n", tx);
+			ptouch_rawstatus(buf);
+		}
 		if (tx != 32 || buf[0] != 0x80 || buf[1] != 0x20) {
 			continue;
-		}
-		if (buf[18] == 0x01) {		/* status type: printing completed */
-			return 0;
 		}
 		if (buf[18] == 0x02) {		/* status type: error occurred */
 			fprintf(stderr, _("printer reported error 0x%02x%02x\n"), buf[9], buf[8]);
 			return -1;
 		}
+		return 0;
 	}
 	fprintf(stderr, _("timeout while waiting for the printer to finish\n"));
 	return -1;
@@ -436,13 +387,13 @@ int ptouch_getstatus(ptouch_dev ptdev)
 	int i, r, tx=0, tries=0;
 	struct timespec w;
 
-	if (ptdev->fd >= 0) {
+	if (ptdev->bt) {
 		/* drop stale replies, then give the Bluetooth link time to answer */
-		tcflush(ptdev->fd, TCIFLUSH);
+		ptbt_discard_input();
 		ptouch_send(ptdev, (uint8_t *)cmd, strlen(cmd));
 		ptouch_read(ptdev, buf, 32, 10000, &tx);
 		if (tx == 0) {
-			fprintf(stderr, _("no status reply - is the printer switched on and in range?\n"));
+			fprintf(stderr, _("no status reply from the printer\n"));
 			return -1;
 		}
 	} else {

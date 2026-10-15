@@ -38,6 +38,7 @@
 #include "config.h"
 #include "gettext.h"	/* gettext(), ngettext() */
 #include "ptouch.h"
+#include "include/btMac.h"
 
 #define _(s) gettext(s)
 
@@ -64,7 +65,8 @@ char *save_png=NULL;
 int verbose=0;
 long fontsize=0;  // Oster
 bool debug=false;
-char *port=NULL;	/* serial port, e.g. Bluetooth /dev/cu.PT-P910BT1234 */
+bool use_bt=false;	/* --bluetooth: skip USB */
+char *bt_name=NULL;	/* optional Bluetooth device name/address */
 
 /* --------------------------------------------------------------------
    -------------------------------------------------------------------- */
@@ -449,7 +451,7 @@ static int flush_print_job(ptouch_dev ptdev, gdImage **out, bool do_precut, bool
 	}
 	gdImageDestroy(label);
 	*out=NULL;
-	if (ptdev->fd >= 0 && final_label) {
+	if (ptdev->bt && final_label) {
 		/* over Bluetooth, wait until the printer is done before closing */
 		return ptouch_wait_print_done(ptdev, 60);
 	}
@@ -463,7 +465,7 @@ void usage(char *progname)
 	fprintf(stderr, "\t--font <file>\t\tuse font <file> or <name>\n");
 	fprintf(stderr, "\t--writepng <file>\tinstead of printing, write output to png file\n");
 	fprintf(stderr, "\t\t\t\tThis currently works only when using\n\t\t\t\tEXACTLY ONE --text statement\n");
-	fprintf(stderr, "\t--port <device>\t\tuse a serial port instead of USB, e.g. the\n\t\t\t\tBluetooth port /dev/cu.PT-P910BT1234. Without\n\t\t\t\tthis, USB is tried first, then /dev/cu.PT-*\n");
+	fprintf(stderr, "\t--bluetooth [name]\tuse a paired Bluetooth printer instead of USB\n\t\t\t\t(name or address, default: first paired PT-*).\n\t\t\t\tWithout this, USB is tried first, then Bluetooth\n");
 	fprintf(stderr, "\t--info\t\t\tPrint tape and device info and exit\n");
 	fprintf(stderr, "\t--debug\t\t\tEnable verbose debug output\n");
 	fprintf(stderr, "\t--version\t\tPrint version info and exit\n");
@@ -508,11 +510,10 @@ int parse_args(int argc, char **argv)
 			} else {
 				usage(argv[0]);
 			}
-		} else if (strcmp(&argv[i][1], "-port") == 0) {
-			if (i+1<argc) {
-				port=argv[++i];
-			} else {
-				usage(argv[0]);
+		} else if (strcmp(&argv[i][1], "-bluetooth") == 0) {
+			use_bt=true;
+			if ((i+1<argc) && (argv[i+1][0] != '-')) {
+				bt_name=argv[++i];
 			}
 		} else if (strcmp(&argv[i][1], "-cutmark") == 0) {
 			continue;	/* not done here */
@@ -575,17 +576,18 @@ int main(int argc, char *argv[])
 	if (i != argc) {
 		usage(argv[0]);
 	}
-	if (port != NULL) {
-		if (ptouch_open_port(&ptdev, port) < 0) {
+	/* Bluetooth needs ptouch-print to be its own "responsible" process */
+	int rc=ptbt_rerun_as_responsible(argc, argv);
+	if (rc >= 0) {
+		return rc;
+	}
+	if (use_bt) {
+		if (ptouch_open_bt(&ptdev, bt_name) < 0) {
 			return 5;
 		}
 	} else if ((ptouch_open(&ptdev)) < 0) {
-		char *bt=ptouch_find_port();
-		if (bt == NULL) {
-			return 5;
-		}
-		fprintf(stderr, _("trying Bluetooth port %s instead\n"), bt);
-		if (ptouch_open_port(&ptdev, bt) < 0) {
+		fprintf(stderr, _("trying Bluetooth instead\n"));
+		if (ptouch_open_bt(&ptdev, NULL) < 0) {
 			return 5;
 		}
 	}
@@ -619,8 +621,10 @@ int main(int argc, char *argv[])
 			} else {
 				usage(argv[0]);
 			}
-		} else if (strcmp(&argv[i][1], "-port") == 0) {
-			i++;	/* handled in parse_args() */
+		} else if (strcmp(&argv[i][1], "-bluetooth") == 0) {
+			if (bt_name != NULL) {
+				i++;	/* handled in parse_args() */
+			}
 		} else if (strcmp(&argv[i][1], "-info") == 0) {
 			printf("printer = %s (%d dpi, %d px printhead)\n", ptdev->devinfo->name, ptdev->devinfo->dpi, ptdev->devinfo->max_px);
 			printf(_("maximum printing width for this tape is %ipx\n"), tape_width);
