@@ -28,7 +28,9 @@ enum LinkError: LocalizedError {
     }
 }
 
-final class AccessoryLink: NSObject, StreamDelegate {
+// Thread-safe: all shared state is guarded by `cond`, streams are only touched
+// on the link thread.
+final class AccessoryLink: NSObject, StreamDelegate, @unchecked Sendable {
     static let protocolString = "com.brother.ptcbp"
 
     private let session: EASession
