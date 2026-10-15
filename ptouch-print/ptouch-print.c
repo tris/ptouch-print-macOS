@@ -44,11 +44,11 @@
 #define MAX_LINES 4	/* maybe this should depend on tape size */
 
 gdImage *image_load(const char *file);
-void rasterline_setpixel(uint8_t rasterline[16], int pixel);
+void rasterline_setpixel(uint8_t *rasterline, size_t size, int pixel);
 int get_baselineoffset(char *text, char *font, int fsz);
 int find_fontsize(int want_px, char *font, char *text);
 int needed_width(char *text, char *font, int fsz);
-int print_img(ptouch_dev ptdev, gdImage *im);
+int print_img(ptouch_dev ptdev, gdImage *im, uint8_t mode_flags, uint8_t advanced_flags);
 int write_png(gdImage *im, const char *file);
 gdImage *img_append(gdImage *in_1, gdImage *in_2);
 gdImage *img_cutmark(int tape_width);
@@ -64,24 +64,29 @@ char *save_png=NULL;
 int verbose=0;
 long fontsize=0;  // Oster
 bool debug=false;
+char *port=NULL;	/* serial port, e.g. Bluetooth /dev/cu.PT-P910BT1234 */
 
 /* --------------------------------------------------------------------
    -------------------------------------------------------------------- */
 
-void rasterline_setpixel(uint8_t rasterline[16], int pixl)
+void rasterline_setpixel(uint8_t *rasterline, size_t size, int pixl)
 {
   unsigned int pixel = pixl;
-	if (pixel > 128) {
+	if (pixel >= size*8) {
 		return;
 	}
-	rasterline[15-(pixel/8)] |= (uint8_t)(1<<(pixel%8));
+	rasterline[(size-1)-(pixel/8)] |= (uint8_t)(1<<(pixel%8));
 	return;
 }
 
-int print_img(ptouch_dev ptdev, gdImage *im)
+/* mode_flags/advanced_flags are only sent from here for printers that use
+   the PT-P900 command order (FLAG_USE_INFO_CMD): raster mode, print
+   information, mode settings, raster data. */
+int print_img(ptouch_dev ptdev, gdImage *im, uint8_t mode_flags, uint8_t advanced_flags)
 {
 	int d,i,k,offset,tape_width;
-	uint8_t rasterline[16];
+	uint8_t rasterline[128];
+	size_t line_bytes=(size_t)(ptdev->devinfo->max_px/8);
 
 	if (!im) {
 		fprintf(stderr, _("nothing to print\n"));
@@ -95,7 +100,9 @@ int print_img(ptouch_dev ptdev, gdImage *im)
 		fprintf(stderr, _("maximum printing width for this tape is %ipx\n"), tape_width);
 		return -1;
 	}
-	offset=64-(gdImageSY(im)/2);	/* always print centered  */
+	/* always print centered on the printhead; some models (PT-P900 series)
+	   have the print area slightly off the head center */
+	offset=(ptdev->devinfo->max_px/2)-(gdImageSY(im)/2)+ptdev->devinfo->pin_offset;
 	if ((ptdev->devinfo->flags & FLAG_RASTER_PACKBITS) == FLAG_RASTER_PACKBITS) {
 		if (debug) {
 			printf("enable PackBits mode\n");
@@ -106,16 +113,24 @@ int print_img(ptouch_dev ptdev, gdImage *im)
 		fprintf(stderr, _("ptouch_rasterstart() failed\n"));
 		return -1;
 	}
+	if (ptdev->devinfo->flags & FLAG_USE_INFO_CMD) {
+		if ((ptouch_info_cmd(ptdev, gdImageSX(im)) != 0) ||
+		    (ptouch_setmode(ptdev, mode_flags) != 0) ||
+		    (ptouch_setadvanced(ptdev, advanced_flags) != 0)) {
+			fprintf(stderr, _("sending print settings failed\n"));
+			return -1;
+		}
+	}
 	for (k=0; k<gdImageSX(im); k+=1) {
 		memset(rasterline, 0, sizeof(rasterline));
 		for (i=0; i<gdImageSY(im); i+=1) {
 			int pixel_value = gdImageGetPixel(im, k, gdImageSY(im)-1-i);
 			// gdMac backend stores grayscale brightness, so threshold to decide on/off pixels.
 			if ((d == 0 && pixel_value <= 127) || (d != 0 && pixel_value >= 128)) {
-				rasterline_setpixel(rasterline, offset+i);
+				rasterline_setpixel(rasterline, line_bytes, offset+i);
 			}
 		}
-		if (ptouch_sendraster(ptdev, rasterline, 16) != 0) {
+		if (ptouch_sendraster(ptdev, rasterline, line_bytes) != 0) {
 			fprintf(stderr, _("ptouch_sendraster() failed\n"));
 			return -1;
 		}
@@ -386,7 +401,11 @@ static int flush_print_job(ptouch_dev ptdev, gdImage **out, bool do_precut, bool
 		return -1;
 	}
 	bool needs_auto_cut = do_precut || (cut_after && !final_label);
-	if (needs_auto_cut) {
+	bool p900_order = (ptdev->devinfo->flags & FLAG_USE_INFO_CMD) != 0;
+	uint8_t mode_flags = needs_auto_cut ? 0x40 : 0x00;
+	bool want_chain = (!final_label) || !cut_after;
+	uint8_t advanced_flags = want_chain ? 0x00 : 0x08;
+	if (needs_auto_cut && !p900_order) {
 		if (ptouch_printinfo(ptdev, media_width_mm) != 0) {
 			fprintf(stderr, _("ptouch_printinfo() failed\n"));
 			gdImageDestroy(label);
@@ -394,22 +413,19 @@ static int flush_print_job(ptouch_dev ptdev, gdImage **out, bool do_precut, bool
 			return -1;
 		}
 	}
-	uint8_t mode_flags = needs_auto_cut ? 0x40 : 0x00;
-	if (ptouch_setmode(ptdev, mode_flags) != 0) {
+	if (!p900_order && ptouch_setmode(ptdev, mode_flags) != 0) {
 		fprintf(stderr, _("ptouch_setmode() failed\n"));
 		gdImageDestroy(label);
 		*out=NULL;
 		return -1;
 	}
-	bool want_chain = (!final_label) || !cut_after;
-	uint8_t advanced_flags = want_chain ? 0x00 : 0x08;
-	if (ptouch_setadvanced(ptdev, advanced_flags) != 0) {
+	if (!p900_order && ptouch_setadvanced(ptdev, advanced_flags) != 0) {
 		fprintf(stderr, _("ptouch_setadvanced() failed\n"));
 		gdImageDestroy(label);
 		*out=NULL;
 		return -1;
 	}
-	if (print_img(ptdev, label) != 0) {
+	if (print_img(ptdev, label, mode_flags, advanced_flags) != 0) {
 		fprintf(stderr, _("could not print image\n"));
 		gdImageDestroy(label);
 		*out=NULL;
@@ -433,6 +449,10 @@ static int flush_print_job(ptouch_dev ptdev, gdImage **out, bool do_precut, bool
 	}
 	gdImageDestroy(label);
 	*out=NULL;
+	if (ptdev->fd >= 0 && final_label) {
+		/* over Bluetooth, wait until the printer is done before closing */
+		return ptouch_wait_print_done(ptdev, 60);
+	}
 	return 0;
 }
 
@@ -443,6 +463,7 @@ void usage(char *progname)
 	fprintf(stderr, "\t--font <file>\t\tuse font <file> or <name>\n");
 	fprintf(stderr, "\t--writepng <file>\tinstead of printing, write output to png file\n");
 	fprintf(stderr, "\t\t\t\tThis currently works only when using\n\t\t\t\tEXACTLY ONE --text statement\n");
+	fprintf(stderr, "\t--port <device>\t\tuse a serial port instead of USB, e.g. the\n\t\t\t\tBluetooth port /dev/cu.PT-P910BT1234. Without\n\t\t\t\tthis, USB is tried first, then /dev/cu.PT-*\n");
 	fprintf(stderr, "\t--info\t\t\tPrint tape and device info and exit\n");
 	fprintf(stderr, "\t--debug\t\t\tEnable verbose debug output\n");
 	fprintf(stderr, "\t--version\t\tPrint version info and exit\n");
@@ -484,6 +505,12 @@ int parse_args(int argc, char **argv)
 		} else if (strcmp(&argv[i][1], "-writepng") == 0) {
 			if (i+1<argc) {
 				save_png=argv[++i];
+			} else {
+				usage(argv[0]);
+			}
+		} else if (strcmp(&argv[i][1], "-port") == 0) {
+			if (i+1<argc) {
+				port=argv[++i];
 			} else {
 				usage(argv[0]);
 			}
@@ -548,8 +575,19 @@ int main(int argc, char *argv[])
 	if (i != argc) {
 		usage(argv[0]);
 	}
-	if ((ptouch_open(&ptdev)) < 0) {
-		return 5;
+	if (port != NULL) {
+		if (ptouch_open_port(&ptdev, port) < 0) {
+			return 5;
+		}
+	} else if ((ptouch_open(&ptdev)) < 0) {
+		char *bt=ptouch_find_port();
+		if (bt == NULL) {
+			return 5;
+		}
+		fprintf(stderr, _("trying Bluetooth port %s instead\n"), bt);
+		if (ptouch_open_port(&ptdev, bt) < 0) {
+			return 5;
+		}
 	}
 	if (ptouch_init(ptdev) != 0) {
 		fprintf(stderr, _("ptouch_init() failed\n"));
@@ -581,7 +619,10 @@ int main(int argc, char *argv[])
 			} else {
 				usage(argv[0]);
 			}
+		} else if (strcmp(&argv[i][1], "-port") == 0) {
+			i++;	/* handled in parse_args() */
 		} else if (strcmp(&argv[i][1], "-info") == 0) {
+			printf("printer = %s (%d dpi, %d px printhead)\n", ptdev->devinfo->name, ptdev->devinfo->dpi, ptdev->devinfo->max_px);
 			printf(_("maximum printing width for this tape is %ipx\n"), tape_width);
 			printf("media type = %02x\n", ptdev->status->media_type);
 			printf("media width = %d mm\n", ptdev->status->media_width);
