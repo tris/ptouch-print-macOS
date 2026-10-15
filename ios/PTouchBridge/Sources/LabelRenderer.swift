@@ -76,22 +76,25 @@ enum LabelRenderer {
     }
 
     private static func renderImage(_ data: Data, request: PrintRequest, height: Int) throws -> LabelBitmap {
-        guard let image = UIImage(data: data)?.cgImage else { throw RenderError.badImage }
-        let w = CGFloat(image.width), h = CGFloat(image.height)
+        // UIImage applies the EXIF orientation of JPEGs, a bare CGImage would not
+        guard let image = UIImage(data: data), image.size.width > 0, image.size.height > 0 else {
+            throw RenderError.badImage
+        }
+        let w = image.size.width, h = image.size.height
         var scale: CGFloat = 1
         switch request.scale {
         case .fit: scale = CGFloat(height) / h
         case .down: scale = min(1, CGFloat(height) / h)
         case .none:
-            if image.height > height { throw RenderError.imageTooTall(image.height, height) }
+            if Int(h) > height { throw RenderError.imageTooTall(Int(h), height) }
         }
         let drawW = max(1, (w * scale).rounded()), drawH = (h * scale).rounded()
         let length = Int(drawW) + 2 * request.pad
         guard length <= maxLength else { throw RenderError.tooLong }
-        return draw(length: length, height: height, flipped: false) { ctx in
+        return draw(length: length, height: height, flipped: true) { ctx in
             ctx.interpolationQuality = scale < 1 ? .high : .none
-            let y = (CGFloat(height) - drawH) / 2
-            ctx.draw(image, in: CGRect(x: CGFloat(request.pad), y: y.rounded(), width: drawW, height: drawH))
+            let y = ((CGFloat(height) - drawH) / 2).rounded()
+            image.draw(in: CGRect(x: CGFloat(request.pad), y: y, width: drawW, height: drawH))
         }
     }
 

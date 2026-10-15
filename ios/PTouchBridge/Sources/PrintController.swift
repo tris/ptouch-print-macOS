@@ -68,12 +68,12 @@ final class PrintController: ObservableObject {
     func submit(_ request: PrintRequest) {
         queue.append(request)
         if !running {
+            running = true
             Task { await runQueue() }
         }
     }
 
     private func runQueue() async {
-        running = true
         while !queue.isEmpty {
             await run(queue.removeFirst())
         }
