@@ -105,20 +105,25 @@ int print_img(ptouch_dev ptdev, gdImage *im, uint8_t mode_flags, uint8_t advance
 	/* always print centered on the printhead; some models (PT-P900 series)
 	   have the print area slightly off the head center */
 	offset=(ptdev->devinfo->max_px/2)-(gdImageSY(im)/2)+ptdev->devinfo->pin_offset;
-	if ((ptdev->devinfo->flags & FLAG_RASTER_PACKBITS) == FLAG_RASTER_PACKBITS) {
-		if (debug) {
-			printf("enable PackBits mode\n");
-		}
+	bool p900_order = (ptdev->devinfo->flags & FLAG_USE_INFO_CMD) != 0;
+	bool packbits = (ptdev->devinfo->flags & FLAG_RASTER_PACKBITS) != 0;
+	if (packbits && debug) {
+		printf("enable PackBits mode\n");
+	}
+	if (packbits && !p900_order) {
 	        ptouch_enable_packbits(ptdev);
 	}
 	if (ptouch_rasterstart(ptdev) != 0) {
 		fprintf(stderr, _("ptouch_rasterstart() failed\n"));
 		return -1;
 	}
-	if (ptdev->devinfo->flags & FLAG_USE_INFO_CMD) {
+	if (p900_order) {
+		/* PT-P900 series: compression must be selected last, after raster
+		   mode is on - the P900/P900W/P950NW start in ESC/P mode */
 		if ((ptouch_info_cmd(ptdev, gdImageSX(im)) != 0) ||
 		    (ptouch_setmode(ptdev, mode_flags) != 0) ||
-		    (ptouch_setadvanced(ptdev, advanced_flags) != 0)) {
+		    (ptouch_setadvanced(ptdev, advanced_flags) != 0) ||
+		    (packbits && ptouch_enable_packbits(ptdev) != 0)) {
 			fprintf(stderr, _("sending print settings failed\n"));
 			return -1;
 		}

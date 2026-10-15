@@ -155,7 +155,11 @@ int ptbt_open(const char *want, char *found_name, size_t found_len) {
       spin(0.1);
     }
     if (!link.openDone || link.openStatus != kIOReturnSuccess) {
-      fprintf(stderr, "Bluetooth connection to %s failed (0x%x) - is it switched on and in range?\n", found_name, link.openStatus);
+      if (!link.openDone) {
+        fprintf(stderr, "Bluetooth connection to %s timed out - is it switched on and in range?\n", found_name);
+      } else {
+        fprintf(stderr, "Bluetooth connection to %s failed (0x%x) - is it switched on and in range?\n", found_name, link.openStatus);
+      }
       [channel closeChannel];
       return -1;
     }

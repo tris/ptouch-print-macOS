@@ -81,7 +81,8 @@ struct _pt_dev_info ptdevs[] = {
 	   (70 bytes per raster line), print area centered at pin 272. */
 	{0x04f9, 0x20c7, "PT-P910BT", 560, 360, FLAG_RASTER_PACKBITS|FLAG_P700_INIT|FLAG_USE_INFO_CMD, -8},
 	/* PT-P910BT: 360dpi, 36mm max tape, 32mm max print height - same
-	   specs as the PT-P900 series, so it uses the same parameters.
+	   specs as the PT-P900 series, and Brother documents both in the same
+	   raster reference: print area centered at pin 272 for all tapes.
 	   Over Bluetooth it is reached through its SPP RFCOMM channel. */
 	{0,0,"",0,0,0,0}
 };
@@ -262,11 +263,13 @@ int ptouch_init(ptouch_dev ptdev)
 {
 	char cmd[]="\x1b\x40";		/* 1B 40 = ESC @ = INIT */
 	if ((ptdev->bt) || (ptdev->devinfo->flags & FLAG_USE_INFO_CMD)) {
-		/* newer printers want 100 bytes of 0x00 (invalidate) before ESC @,
-		   which also clears any half-received job */
+		/* newer printers want 200 bytes of 0x00 (invalidate) before ESC @,
+		   which also clears any half-received job. Sent in two parts
+		   because ptouch_send() takes at most 128 bytes. */
 		uint8_t inval[100];
 		memset(inval, 0, sizeof(inval));
-		if (ptouch_send(ptdev, inval, sizeof(inval)) != 0) {
+		if ((ptouch_send(ptdev, inval, sizeof(inval)) != 0) ||
+		    (ptouch_send(ptdev, inval, sizeof(inval)) != 0)) {
 			return -1;
 		}
 	}
