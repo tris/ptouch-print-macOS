@@ -9,7 +9,8 @@ This fork focuses on label cutting control and predictable image handling for Br
 - **Extended cutting controls.** Adds runtime options for automatic pre-cut, explicit chain cuts between segments, and optional post-cut suppression. These changes are aimed at reducing leader waste on devices that support hardware cutting.
 - **No automatic image scaling.** PNG assets are sent to the printer at their original resolution. Prepare artwork at the correct tape pixel height before printing.
 - **360 dpi printers.** Supports the PT-P900 series raster protocol (560-pin printhead, 360 dpi), including the Brother **PT-P910BT**.
-- **Target hardware.** Cutting features have been tested on the Brother **PT-2730**; 360 dpi support on the **PT-P910BT**. Other models in `libptouch.c` remain unverified.
+- **Bluetooth.** Prints to a paired PT-P910BT over Bluetooth as well as USB.
+- **Target hardware.** Cutting features have been tested on the Brother **PT-2730**; 360 dpi and Bluetooth support on the **PT-P910BT**. Other models in `libptouch.c` remain unverified.
 
 ## Quick start
 
@@ -44,6 +45,7 @@ ptouch-print [options] <print-command(s)>
 - `--font <file|name>`: Use a font file or font name (default: `Helvetica`).
 - `--fontsize <n>`: Force a specific font size in points.
 - `--writepng <file>`: Write the output to a PNG instead of printing. This only works with **exactly one** `--text` command.
+- `--bluetooth [name]`: Print over Bluetooth instead of USB. `name` is (part of) the paired printer's name or its address; by default the first paired `PT-*` printer is used. See [Bluetooth](#bluetooth).
 - `--info`: Print printer and tape info (model, dpi, max print width in pixels, media type, width in mm, colors, error code) and exit.
 - `--debug`: Enable verbose debug output while rendering/printing.
 - `--version`: Print version info and exit.
@@ -144,6 +146,24 @@ maximum printing width for this tape is 320px
 ```
 
 Printable heights at 360 dpi: 3.5 mm = 48 px, 6 mm = 64 px, 9 mm = 106 px, 12 mm = 150 px, 18 mm = 234 px, 24 mm = 320 px, 36 mm = 454 px. Only 24 mm tape has been tested on hardware so far.
+
+## Bluetooth
+
+The PT-P910BT can print over Bluetooth:
+
+1. Pair the printer in **System Settings > Bluetooth**.
+2. Print with `--bluetooth`, or just leave the USB cable unplugged: when no USB printer is found, `ptouch-print` falls back to the first paired `PT-*` printer.
+
+```sh
+./build/Release/ptouch-print --bluetooth --text "Hello"
+```
+
+Notes:
+
+- The first time, macOS asks whether `ptouch-print` may use Bluetooth. If it is denied, enable it under **System Settings > Privacy & Security > Bluetooth**. Rebuilding the tool may make macOS ask again.
+- Connecting takes a couple of seconds, or longer when the printer has just woken up. If the printer has turned itself off, it reports a connection timeout.
+- The `/dev/cu.PT-P910BT…` serial port that macOS creates for the printer does not work; `ptouch-print` talks to the printer through IOBluetooth instead.
+- `--debug` shows the printer's Bluetooth services and its status replies.
 
 ## Building
 

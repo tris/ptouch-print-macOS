@@ -36,6 +36,9 @@
 #endif
 #include "gettext.h"	/* gettext(), ngettext() */
 #include "ptouch.h"
+#if TARGET_OS_MAC
+#include "include/btMac.h"
+#endif
 
 #define _(s) gettext(s)
 
@@ -79,7 +82,8 @@ struct _pt_dev_info ptdevs[] = {
 	{0x04f9, 0x20c7, "PT-P910BT", 560, 360, FLAG_RASTER_PACKBITS|FLAG_P700_INIT|FLAG_USE_INFO_CMD, -8},
 	/* PT-P910BT: 360dpi, 36mm max tape, 32mm max print height - same
 	   specs as the PT-P900 series, and Brother documents both in the same
-	   raster reference: print area centered at pin 272 for all tapes. */
+	   raster reference: print area centered at pin 272 for all tapes.
+	   Over Bluetooth it is reached through its SPP RFCOMM channel. */
 	{0,0,"",0,0,0,0}
 };
 
@@ -97,6 +101,8 @@ static void ptouch_set_devinfo(ptouch_dev ptdev, int k)
 
 void ptouch_rawstatus(uint8_t raw[32]);
 
+int ptouch_debug=0;	/* set by --debug */
+
 static int ptouch_alloc(ptouch_dev *ptdev)
 {
 	if ((*ptdev=calloc(1, sizeof(struct _ptouch_dev))) == NULL) {
@@ -111,6 +117,38 @@ static int ptouch_alloc(ptouch_dev *ptdev)
 		fprintf(stderr, _("out of memory\n"));
 		return -1;
 	}
+	return 0;
+}
+
+/* Open a paired printer over Bluetooth. want is a (part of the) device
+   name or address, or NULL for the first paired "PT-*" device. The printer
+   model is derived from the Bluetooth device name, e.g. "PT-P910BT2863". */
+int ptouch_open_bt(ptouch_dev *ptdev, const char *want)
+{
+	char name[128];
+	int k, found=-1;
+
+	if (ptouch_alloc(ptdev) != 0) {
+		return -1;
+	}
+	if (ptbt_open(want, ptouch_debug, name, sizeof(name)) != 0) {
+		return -1;
+	}
+	for (k=0; ptdevs[k].vid > 0; k++) {
+		/* prefer the longest matching name */
+		if (strstr(name, ptdevs[k].name) != NULL &&
+		    (found < 0 || strlen(ptdevs[k].name) > strlen(ptdevs[found].name))) {
+			found=k;
+		}
+	}
+	if (found < 0 || (ptdevs[found].flags & (FLAG_PLITE|FLAG_UNSUP_RASTER))) {
+		fprintf(stderr, _("printer model %s is not supported\n"), name);
+		ptbt_close();
+		return -1;
+	}
+	(*ptdev)->bt=1;
+	ptouch_set_devinfo(*ptdev, found);
+	fprintf(stderr, _("%s connected over Bluetooth\n"), ptdevs[found].name);
 	return 0;
 }
 
@@ -182,6 +220,10 @@ int ptouch_open(ptouch_dev *ptdev)
 
 int ptouch_close(ptouch_dev ptdev)
 {
+	if (ptdev->bt) {
+		ptbt_close();
+		return 0;
+	}
 	libusb_release_interface(ptdev->h, 0);
 	libusb_close(ptdev->h);
 	return 0;
@@ -194,6 +236,9 @@ int ptouch_send(ptouch_dev ptdev, uint8_t *data, size_t len)
 	if ((ptdev == NULL) || (len > 128)) {
 		return -1;
 	}
+	if (ptdev->bt) {
+		return ptbt_write(data, len);
+	}
 	if ((r=libusb_bulk_transfer(ptdev->h, 0x02, data, (int)len, &tx, 0)) != 0) {
 		fprintf(stderr, _("write error: %s\n"), libusb_error_name(r));
 		return -1;
@@ -205,17 +250,21 @@ int ptouch_send(ptouch_dev ptdev, uint8_t *data, size_t len)
 	return 0;
 }
 
-/* Read up to len bytes, waiting at most timeout_ms */
+/* Read up to len bytes, waiting at most timeout_ms. Over Bluetooth the
+   reply can arrive in pieces, so wait until len bytes arrived. */
 int ptouch_read(ptouch_dev ptdev, uint8_t *buf, int len, int timeout_ms, int *tx)
 {
 	*tx=0;
+	if (ptdev->bt) {
+		return ptbt_read(buf, len, timeout_ms, tx);
+	}
 	return libusb_bulk_transfer(ptdev->h, 0x81, buf, len, tx, (unsigned int)timeout_ms);
 }
 
 int ptouch_init(ptouch_dev ptdev)
 {
 	char cmd[]="\x1b\x40";		/* 1B 40 = ESC @ = INIT */
-	if (ptdev->devinfo->flags & FLAG_USE_INFO_CMD) {
+	if ((ptdev->bt) || (ptdev->devinfo->flags & FLAG_USE_INFO_CMD)) {
 		/* newer printers want 200 bytes of 0x00 (invalidate) before ESC @,
 		   which also clears any half-received job. Sent in two parts
 		   because ptouch_send() takes at most 128 bytes. */
@@ -241,6 +290,39 @@ int ptouch_info_cmd(ptouch_dev ptdev, int raster_lines)
 	cmd[9]=(uint8_t)((raster_lines >> 16) & 0xff);
 	cmd[10]=(uint8_t)((raster_lines >> 24) & 0xff);
 	return ptouch_send(ptdev, cmd, sizeof(cmd));
+}
+
+/* After the print command, wait until the printer has taken the whole job
+   before disconnecting. The PT-P910BT sends no "printing completed" status
+   on its own, so ask for a status: the printer answers once it has
+   processed everything sent before the request. */
+int ptouch_wait_print_done(ptouch_dev ptdev, int timeout_sec)
+{
+	char cmd[]="\x1biS";	/* ESC i S = status information request */
+	uint8_t buf[32];
+	int tx;
+	time_t end=time(NULL)+timeout_sec;
+
+	if (ptouch_send(ptdev, (uint8_t *)cmd, strlen(cmd)) != 0) {
+		return -1;
+	}
+	while (time(NULL) < end) {
+		ptouch_read(ptdev, buf, 32, 1000, &tx);
+		if (tx > 0 && ptouch_debug) {
+			fprintf(stderr, "status reply (%d bytes):\n", tx);
+			ptouch_rawstatus(buf);
+		}
+		if (tx != 32 || buf[0] != 0x80 || buf[1] != 0x20) {
+			continue;
+		}
+		if (buf[18] == 0x02) {		/* status type: error occurred */
+			fprintf(stderr, _("printer reported error 0x%02x%02x\n"), buf[9], buf[8]);
+			return -1;
+		}
+		return 0;
+	}
+	fprintf(stderr, _("timeout while waiting for the printer to finish\n"));
+	return -1;
 }
 
 int ptouch_enable_packbits(ptouch_dev ptdev)
@@ -310,7 +392,18 @@ int ptouch_getstatus(ptouch_dev ptdev)
 	int i, r, tx=0, tries=0;
 	struct timespec w;
 
-	ptouch_send(ptdev, (uint8_t *)cmd, strlen(cmd));
+	if (ptdev->bt) {
+		/* drop stale replies, then give the Bluetooth link time to answer */
+		ptbt_discard_input();
+		ptouch_send(ptdev, (uint8_t *)cmd, strlen(cmd));
+		ptouch_read(ptdev, buf, 32, 10000, &tx);
+		if (tx == 0) {
+			fprintf(stderr, _("no status reply from the printer\n"));
+			return -1;
+		}
+	} else {
+		ptouch_send(ptdev, (uint8_t *)cmd, strlen(cmd));
+	}
 	while (tx == 0) {
 		w.tv_sec=0;
 		w.tv_nsec=100000000;	/* 0.1 sec */

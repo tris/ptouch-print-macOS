@@ -89,12 +89,17 @@ struct _ptouch_dev {
 	pt_dev_info devinfo;
 	pt_dev_stat status;
 	uint16_t tape_width_px;
+	int bt;			/* connected over Bluetooth instead of USB */
 };
 typedef struct _ptouch_dev *ptouch_dev;
 
+extern int ptouch_debug;	/* verbose debug output (--debug) */
+
 int ptouch_open(ptouch_dev *ptdev);
+int ptouch_open_bt(ptouch_dev *ptdev, const char *want);
 int ptouch_read(ptouch_dev ptdev, uint8_t *buf, int len, int timeout_ms, int *tx);
 int ptouch_info_cmd(ptouch_dev ptdev, int raster_lines);
+int ptouch_wait_print_done(ptouch_dev ptdev, int timeout_sec);
 int ptouch_close(ptouch_dev ptdev);
 int ptouch_send(ptouch_dev ptdev, uint8_t *data, size_t len);
 int ptouch_init(ptouch_dev ptdev);
