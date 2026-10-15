@@ -10,6 +10,10 @@ This fork focuses on label cutting control and predictable image handling for Br
 - **No automatic image scaling.** PNG assets are sent to the printer at their original resolution. Prepare artwork at the correct tape pixel height before printing.
 - **Target hardware.** Features have only been tested on the Brother **PT-2730**. Other models in `libptouch.c` remain unverified.
 
+## iOS
+
+[`ios/`](ios/README.md) holds P-Touch Bridge, an iOS app that prints labels from a web page on a PT-P910BT over Bluetooth, using the same printer protocol.
+
 ## Quick start
 
 1. Open `ptouch-print.xcodeproj` in Xcode and build the `ptouch-print` target.

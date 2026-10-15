@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>P-Touch Bridge example</title>
+<style>
+  body { font: 16px -apple-system, system-ui, sans-serif; margin: 16px; max-width: 32em; }
+  textarea, input, button { font: inherit; }
+  textarea { width: 100%; box-sizing: border-box; }
+  button { padding: 8px 16px; margin: 8px 8px 0 0; }
+  #result { margin-top: 16px; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>Print a label</h1>
+<p><textarea id="text" rows="2">Hello
+P-Touch</textarea></p>
+<p><label>Copies <input id="copies" type="number" min="1" max="99" value="1"></label></p>
+<button id="print-text">Print text</button>
+<button id="print-image">Print drawn image</button>
+<p id="result"></p>
+
+<script>
+// Send a label to the P-Touch Bridge iOS app. The app prints it, then opens
+// x-success (or x-error, with errorCode and errorMessage added), which brings
+// the user back to this page.
+function printLabel(params) {
+  const here = location.href.split('#')[0];
+  const q = new URLSearchParams(params);
+  q.set('x-success', here + '#printed');
+  q.set('x-error', here + '#print-error');
+  location.href = 'ptouchbridge://print?' + q.toString();
+}
+
+document.getElementById('print-text').onclick = () => {
+  const lines = document.getElementById('text').value.split('\n');
+  const params = lines.map(line => ['text', line]);
+  params.push(['copies', document.getElementById('copies').value]);
+  printLabel(params);
+};
+
+// An image label: draw on a canvas and send it as a PNG. The canvas height
+// runs across the tape; the app scales it down to the loaded tape's printable
+// height (454 px on 36 mm tape), or use scale=fit to scale it up as well.
+document.getElementById('print-image').onclick = () => {
+  const c = document.createElement('canvas');
+  c.width = 600; c.height = 150;
+  const g = c.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+  g.strokeStyle = '#000'; g.lineWidth = 8; g.strokeRect(4, 4, c.width - 8, c.height - 8);
+  g.fillStyle = '#000'; g.font = 'bold 90px sans-serif'; g.textBaseline = 'middle';
+  g.fillText('BOX 42', 40, c.height / 2);
+  printLabel({ image: c.toDataURL('image/png'), scale: 'fit', pad: '20' });
+};
+
+// Show what the app reported back.
+function showResult() {
+  const el = document.getElementById('result');
+  if (location.hash === '#printed') {
+    el.textContent = 'Printed.';
+  } else if (location.hash.startsWith('#print-error')) {
+    const q = new URLSearchParams(location.search);
+    el.textContent = 'Print failed: ' + (q.get('errorMessage') || 'unknown error');
+  }
+}
+window.addEventListener('hashchange', showResult);
+showResult();
+</script>
+</body>
+</html>

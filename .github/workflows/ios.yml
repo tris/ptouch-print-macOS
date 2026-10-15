@@ -1,0 +1,22 @@
+name: iOS bridge
+
+on:
+  push:
+    paths: ["ios/**", ".github/workflows/ios.yml"]
+  pull_request:
+    paths: ["ios/**", ".github/workflows/ios.yml"]
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit checks
+        run: |
+          swiftc ios/PTouchBridge/Sources/RasterCommands.swift ios/PTouchBridge/Sources/PrintRequest.swift ios/Tests/main.swift -o "$RUNNER_TEMP/checks"
+          "$RUNNER_TEMP/checks"
+      - name: Build for the simulator
+        run: |
+          xcodebuild -project ios/PTouchBridge.xcodeproj -target PTouchBridge \
+            -sdk iphonesimulator -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO build
